@@ -1,0 +1,51 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: 交叉编译并打包
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp LICENSE dist/
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            echo "==> $os/$arch"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w" -o dist/tralomo .
+            tar -czf "dist/tralomo_${os}_${arch}.tar.gz" -C dist tralomo LICENSE
+            rm -f dist/tralomo
+          done
+
+      - name: 生成校验和
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum tralomo_*.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: 上传 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tralomo_*.tar.gz
+            dist/checksums.txt
+          generate_release_notes: true
