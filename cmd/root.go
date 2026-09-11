@@ -19,6 +19,7 @@ var (
 	flagTo        string
 	flagEngine    string
 	flagStripANSI bool
+	flagNoStream  bool
 	engine        translator.Engine
 )
 
@@ -35,10 +36,14 @@ var rootCmd = &cobra.Command{
 输出含 ANSI 颜色/控制序列时，加 --strip-ansi 先剥掉再翻译：
   tralomo run --strip-ansi -- <命令> [参数...]
 
+AI 引擎（-e ai）默认流式输出，边翻译边打印；加 --no-stream 可关闭。
+
 AI 引擎（-e ai）需要配置环境变量（均必填）：
   TRALOMO_AI_BASE_URL  接口地址，如 https://api.openai.com/v1
   TRALOMO_AI_API_KEY   API key
-  TRALOMO_AI_MODEL     模型名，如 gpt-4o-mini`,
+  TRALOMO_AI_MODEL     模型名，如 gpt-4o-mini
+另有可选变量 TRALOMO_AI_IDLE_TIMEOUT（多久没收到数据就放弃，默认 60s），
+用于避免上游卡住不吐数据也不关连接时无限等待。`,
 	Example: `  tralomo hello world
   tralomo -t en 你好世界
   tralomo -e bing -t ja "good morning"
@@ -78,6 +83,8 @@ func init() {
 		"目标语言，如 zh-CN、en、ja（可用环境变量 TRALOMO_TO 设置，未设置则用系统 locale）")
 	rootCmd.PersistentFlags().BoolVar(&flagStripANSI, "strip-ansi", false,
 		"翻译前剥掉 ANSI 转义序列（用于处理带颜色的命令输出）")
+	rootCmd.PersistentFlags().BoolVar(&flagNoStream, "no-stream", false,
+		"关闭流式输出（AI 引擎默认边翻译边输出）")
 
 	rootCmd.AddCommand(runCmd)
 }
@@ -150,12 +157,49 @@ func translateAndPrint(text string) error {
 		to = lang.SystemTarget()
 	}
 
+	// 支持流式的引擎（目前只有 AI）默认边翻译边输出。
+	if s, ok := engine.(translator.Streamer); ok && !flagNoStream {
+		return streamAndPrint(s, text, to)
+	}
+
 	res, err := engine.Translate(context.Background(), text, to)
 	if err != nil {
 		return err
 	}
 
 	fmt.Println(res.Text)
+	return nil
+}
+
+// streamAndPrint 把流式翻译的片段实时写到标准输出，并在结尾补一个换行。
+func streamAndPrint(s translator.Streamer, text, to string) error {
+	started := false
+	last := byte(0)
+
+	err := s.TranslateStream(context.Background(), text, to, func(delta string) error {
+		if !started {
+			// 丢掉开头空白，与一次性输出的 TrimSpace 行为保持一致。
+			delta = strings.TrimLeft(delta, " \t\r\n")
+		}
+		if delta == "" {
+			return nil
+		}
+		started = true
+		last = delta[len(delta)-1]
+		_, werr := os.Stdout.WriteString(delta)
+		return werr
+	})
+
+	if err != nil {
+		if started {
+			// 已经输出过内容时补换行，避免错误信息与译文粘在一行。
+			fmt.Println()
+		}
+		return err
+	}
+	if started && last != '\n' {
+		fmt.Println()
+	}
 	return nil
 }
 

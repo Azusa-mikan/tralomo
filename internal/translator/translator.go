@@ -2,10 +2,15 @@ package translator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
+
+// errNoProgress 表示对端在超时时间内没有发送任何数据（既不断开也不响应）。
+// 这类失败重试只会再等一个超时周期，因此不重试。
+var errNoProgress = errors.New("对端响应超时")
 
 const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
 
@@ -21,6 +26,14 @@ type Result struct {
 	Text string
 }
 
+// Streamer 是支持流式输出的 Engine，目前只有 AI 引擎实现。
+// CLI 在流式模式下会优先用它；不支持流式的引擎照常走 Translate。
+type Streamer interface {
+	// TranslateStream 把 text 翻译成目标语言 to，并按到达顺序把译文片段交给 emit。
+	// emit 返回错误时立即中止。某个分段一旦已产出内容就不会重试，以免重复输出。
+	TranslateStream(ctx context.Context, text, to string, emit func(string) error) error
+}
+
 // provider 是各引擎实现的「单次请求」翻译；长文本分段与重试由 chunkedEngine 统一处理。
 type provider interface {
 	translate(ctx context.Context, text, to string) (Result, error)
@@ -29,6 +42,12 @@ type provider interface {
 	limit(to string) int
 	// measure 返回 text 占用的容量单位数（字节数或 token 数）。
 	measure(text string) int
+}
+
+// streamProvider 是 provider 的可选扩展：支持流式返回译文片段。
+type streamProvider interface {
+	// stream 发起一次流式请求，把译文片段按到达顺序交给 emit。
+	stream(ctx context.Context, text, to string, emit func(string) error) error
 }
 
 // engineRegistry 是所有可用引擎的注册表，顺序即展示顺序。
@@ -90,6 +109,9 @@ func (c chunkedEngine) translateChunk(ctx context.Context, text, to string) (Res
 			return res, nil
 		}
 		lastErr = err
+		if errors.Is(err, errNoProgress) {
+			break
+		}
 		if attempt < maxTranslateAttempts {
 			select {
 			case <-time.After(time.Duration(attempt) * time.Second):
@@ -99,6 +121,40 @@ func (c chunkedEngine) translateChunk(ctx context.Context, text, to string) (Res
 		}
 	}
 	return Result{}, lastErr
+}
+
+// translateChunkStream 流式翻译单个分段。只有在尚未产出任何内容时才重试，
+// 否则重试会造成重复输出。
+func (c chunkedEngine) translateChunkStream(ctx context.Context, text, to string, emit func(string) error) error {
+	sp, ok := c.provider.(streamProvider)
+	if !ok {
+		return fmt.Errorf("引擎不支持流式输出")
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxTranslateAttempts; attempt++ {
+		emitted := false
+		err := sp.stream(ctx, text, to, func(delta string) error {
+			emitted = true
+			return emit(delta)
+		})
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if emitted || errors.Is(err, errNoProgress) {
+			// 已经吐出部分译文就无法回退；对端超时则重试也只是再等一轮。
+			break
+		}
+		if attempt < maxTranslateAttempts {
+			select {
+			case <-time.After(time.Duration(attempt) * time.Second):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return lastErr
 }
 
 // splitText 把文本切成每段 measure 不超过 limit 的若干段，尽量在换行处断开，

@@ -59,6 +59,7 @@ tralomo run [flags] -- <命令> [参数...]
 | `-t, --to <语言>` | 目标语言，如 `zh-CN`、`en`、`ja`；不填则用 `TRALOMO_TO`，再否则用系统 locale |
 | `-e, --engine <引擎>` | 翻译引擎：`google`、`bing`、`ai`；不填则用 `TRALOMO_ENGINE`，再否则 `google` |
 | `--strip-ansi` | 翻译前剥掉 ANSI 转义序列（处理带颜色的命令输出） |
+| `--no-stream` | 关闭流式输出；`ai` 引擎默认边翻译边打印 |
 | `-h, --help` | 帮助 |
 
 优先级：**命令行开关 > 环境变量 > 内置默认**。
@@ -93,6 +94,7 @@ grep --color=always ... | tralomo --strip-ansi -t zh-CN
 | `TRALOMO_AI_BASE_URL` | AI 接口地址（`-e ai` 时**必填**），如 `https://api.openai.com/v1` | 无 |
 | `TRALOMO_AI_API_KEY` | AI 的 API key（`-e ai` 时**必填**） | 无 |
 | `TRALOMO_AI_MODEL` | AI 模型名（`-e ai` 时**必填**），如 `gpt-4o-mini` | 无 |
+| `TRALOMO_AI_IDLE_TIMEOUT` | AI 请求「多久没收到数据就放弃」（可选），如 `60s`、`2m` | `60s` |
 
 ## 引擎
 
@@ -112,6 +114,8 @@ TRALOMO_AI_MODEL=gpt-4o-mini \
 ```
 
 > 目标语言用通用语言码即可（如 `zh-CN`）。Bing 对语言码较严格，内部会自动归一化（`zh-CN`→`zh-Hans`、`en-US`→`en` 等）。
+
+`ai` 引擎默认**流式输出**，边翻译边打印，长文本不必等整段返回；加 `--no-stream` 可改为一次性输出（其余引擎不受影响）。
 
 ## 长文本与分段
 
